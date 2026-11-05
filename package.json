@@ -5,7 +5,8 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "test:db": "tsx src/scripts/testDb.ts"
+    "test:db": "tsx src/scripts/testDb.ts",
+    "test:ai": "tsx src/scripts/testAi.ts"
   },
   "repository": {
     "type": "git",
@@ -25,6 +26,7 @@
     "typescript": "^7.0.2"
   },
   "dependencies": {
+    "@google/genai": "^2.32.0",
     "dotenv": "^18.0.9",
     "mongoose": "^9.12.0"
   }
