@@ -10,6 +10,7 @@ import { RoomModel } from '../models/Room';
 import { isValidUsername } from '../models/User';
 import {
   saveMessage,
+  saveAiMessage,
   getHistory,
   canAccessRoom,
   MessageValidationError,
@@ -25,7 +26,11 @@ function check(name: string, ok: boolean) {
 }
 
 /** Passes only if fn throws the expected error class (not e.g. a DB error). */
-async function rejects(name: string, fn: () => Promise<unknown>, errorClass: Function = MessageValidationError) {
+async function rejects(
+  name: string,
+  fn: () => Promise<unknown>,
+  errorClass: new (...args: never[]) => Error = MessageValidationError,
+) {
   try {
     await fn();
     check(`${name} (no error thrown)`, false);
@@ -46,6 +51,8 @@ async function run() {
   check('Thai username is valid', isValidUsername('บีม'));
   check('username with "_" is rejected', !isValidUsername('anna_b'));
   check('username with space is rejected (AI name reserved)', !isValidUsername(AI_SENDER));
+  check('username "." / ".." / "-" is rejected', !isValidUsername('.') && !isValidUsername('..') && !isValidUsername('-'));
+  check('username starting with a tone mark is rejected', !isValidUsername('\u0E48'));
 
   // --- Save + history
   await saveMessage({ roomId: ROOM, sender: 'Beam', type: 'text', content: 'first' });
@@ -58,8 +65,11 @@ async function run() {
     Object.keys(second).sort().join() === ['content', 'id', 'readBy', 'roomId', 'sender', 'timestamp', 'type'].join(),
   );
 
-  const ai = await saveMessage({ roomId: ROOM, sender: AI_SENDER, type: 'ai', content: 'hello from AI' });
-  check('AI message saved with empty readBy', ai.readBy.length === 0);
+  const ai = await saveAiMessage(ROOM, 'hello from AI', 'Beam');
+  check('AI message saved with AI sender + empty readBy', ai.sender === AI_SENDER && ai.type === 'ai' && ai.readBy.length === 0);
+  const longAi = await saveAiMessage(ROOM, 'x'.repeat(5000), 'Beam');
+  check('long AI reply is truncated, not rejected', longAi.content.length === 4000);
+  await MessageModel.deleteOne({ _id: longAi.id });
 
   const history = await getHistory(ROOM);
   check('history is chronological', history.at(-1)?.content === 'hello from AI' && history.at(-3)?.content === 'first');
@@ -79,7 +89,12 @@ async function run() {
   await rejects('rejects invalid type', () =>
     saveMessage({ roomId: ROOM, sender: 'Beam', type: 'bogus' as 'text', content: 'x' }),
   );
-  await rejects('rejects user spoofing AI', () => saveMessage({ roomId: ROOM, sender: 'Beam', type: 'ai', content: 'x' }));
+  await rejects('rejects type "ai" from saveMessage', () =>
+    saveMessage({ roomId: ROOM, sender: 'Beam', type: 'ai' as 'text', content: 'x' }),
+  );
+  await rejects('rejects forged AI message (AI sender + ai type)', () =>
+    saveMessage({ roomId: ROOM, sender: AI_SENDER, type: 'ai' as 'text', content: 'x' }),
+  );
   await rejects('rejects AI sender with text type', () =>
     saveMessage({ roomId: ROOM, sender: AI_SENDER, type: 'text', content: 'x' }),
   );
@@ -88,6 +103,12 @@ async function run() {
   );
   await rejects('rejects empty attachment', () =>
     saveMessage({ roomId: ROOM, sender: 'Beam', type: 'image', content: 'data:image/png;base64,' }),
+  );
+  await rejects('rejects HTML file', () =>
+    saveMessage({ roomId: ROOM, sender: 'Beam', type: 'file', content: 'data:text/html;base64,PGgxPg==' }),
+  );
+  await rejects('rejects Base64 with bad length', () =>
+    saveMessage({ roomId: ROOM, sender: 'Beam', type: 'file', content: 'data:text/plain;base64,QQQ' }),
   );
   await rejects('rejects non-Base64 attachment', () =>
     saveMessage({ roomId: ROOM, sender: 'Beam', type: 'file', content: 'data:text/plain;base64,@@@' }),
@@ -112,6 +133,7 @@ async function run() {
   check('non-existent group blocked', !(await canAccessRoom('group_Nope', 'Beam')));
   await rejects('non-member cannot send to group', () =>
     saveMessage({ roomId: ROOM, sender: 'Mail', type: 'text', content: 'hi' }), RoomAccessError);
+  await rejects('AI cannot be triggered by a non-member', () => saveAiMessage(ROOM, 'hi', 'Mail'), RoomAccessError);
   await rejects('outsider cannot send to private room', () =>
     saveMessage({ roomId: 'private_Beam_Mail', sender: 'Bird', type: 'text', content: 'hi' }), RoomAccessError);
 }

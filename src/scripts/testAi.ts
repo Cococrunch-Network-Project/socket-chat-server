@@ -26,12 +26,17 @@ const model = process.env.GEMINI_MODEL ?? 'gemini-3.8-flash';
     console.log(`✅ ${model}:`, res.text);
   } catch (err) {
     console.error('❌', err instanceof Error ? err.message : err);
-
-    // If the model name is invalid, print models that support generateContent
-    const pager = await ai.models.list();
-    for await (const m of pager) {
-      if (m.supportedActions?.includes('generateContent')) console.log(' -', m.name);
-    }
     process.exitCode = 1;
+
+    // If the model name is invalid, print models that support generateContent.
+    // Guarded separately: on auth/network errors this call fails too.
+    try {
+      const pager = await ai.models.list();
+      for await (const m of pager) {
+        if (m.supportedActions?.includes('generateContent')) console.log(' -', m.name);
+      }
+    } catch {
+      // Ignore: the original error above is the useful one
+    }
   }
 })();

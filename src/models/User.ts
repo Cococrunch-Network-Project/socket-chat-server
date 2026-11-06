@@ -2,11 +2,13 @@ import { Schema, model } from 'mongoose';
 
 /**
  * Allowed username: 1–30 letters (any language, incl. Thai vowel/tone marks),
- * digits, '.' or '-'. '_' is banned because private room ids use it as a
- * separator (private_<a>_<b>), and spaces are banned so nobody can register
- * the bot name "AI Assistant".
+ * digits, '.' or '-'.
+ * - must contain at least one letter or digit (blocks ".", "..", "-")
+ * - must not start with a combining mark (blocks a lone Thai tone mark)
+ * - '_' is banned because private room ids use it as a separator (private_<a>_<b>)
+ * - spaces are banned so nobody can register the bot name "AI Assistant"
  */
-export const USERNAME_RE = /^[\p{L}\p{M}\p{N}.\-]{1,30}$/u;
+export const USERNAME_RE = /^(?!\p{M})(?=.*[\p{L}\p{N}])[\p{L}\p{M}\p{N}.\-]{1,30}$/u;
 
 /** Returns true if the username is well-formed (use in register_user — R3). */
 export function isValidUsername(name: unknown): name is string {

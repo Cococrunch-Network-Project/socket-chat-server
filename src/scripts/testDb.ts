@@ -9,7 +9,7 @@ import { connectDB } from '../db/connect';
 import { UserModel } from '../models/User';
 import { RoomModel } from '../models/Room';
 import { MessageModel } from '../models/Message';
-import { toChatMessage } from '../services/messageService';
+import { toChatMessage, type MessageRecord } from '../services/messageService';
 
 const TEST_USER = 'TestUser';
 const TEST_ROOM = 'group_TestDb';
@@ -18,16 +18,17 @@ const TEST_ROOM = 'group_TestDb';
   try {
     await connectDB();
 
-    await UserModel.updateOne({ username: TEST_USER }, { isOnline: true }, { upsert: true });
+    // runValidators: upserts skip schema validation (e.g. username rules) by default
+    await UserModel.updateOne({ username: TEST_USER }, { isOnline: true }, { upsert: true, runValidators: true });
     await RoomModel.updateOne(
       { roomId: TEST_ROOM },
       { type: 'group', groupName: 'TestDb', creator: TEST_USER, members: [TEST_USER] },
-      { upsert: true },
+      { upsert: true, runValidators: true },
     );
     const msg = await MessageModel.create({ roomId: TEST_ROOM, sender: TEST_USER, content: 'DB test' });
 
     // Print in the client-facing ChatMessage shape
-    console.log('Message:', toChatMessage(msg.toObject() as never));
+    console.log('Message:', toChatMessage(msg.toObject() as unknown as MessageRecord));
     console.log('✅ users, rooms and messages collections are writable');
   } catch (err) {
     console.error('❌', err instanceof Error ? err.message : err);

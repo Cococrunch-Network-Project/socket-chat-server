@@ -1,3 +1,4 @@
+import { Types } from 'mongoose';
 import { MessageModel, AI_SENDER } from '../models/Message';
 import { RoomModel } from '../models/Room';
 import { isValidUsername } from '../models/User';
@@ -5,17 +6,20 @@ import { getPrivateRoomId, type ChatMessage } from '../types/socket';
 
 /**
  * Message persistence service (Task 2.2 — Chat History).
- * - saveMessage():   validate + authorize + store a message, return it as a ChatMessage
+ * - saveMessage():   validate + authorize + store a USER message
+ * - saveAiMessage(): store an AI bot reply (server-side only, for Task 2.3)
  * - getHistory():    load the latest messages of a room (size-capped)
  * - canAccessRoom(): check that a user may read/write a room (R7, R11)
  */
 
 export type MessageType = ChatMessage['type'];
+/** Message types a client may send. 'ai' is reserved for the server's AI bot. */
+export type UserMessageType = Exclude<MessageType, 'ai'>;
 
 export interface NewMessageInput {
   roomId: string;
   sender: string;
-  type: MessageType;
+  type: UserMessageType;
   content: string;
   fileName?: string | undefined;
 }
@@ -28,14 +32,26 @@ export const LIMITS = {
   FILE_NAME_MAX: 255,
   HISTORY_DEFAULT: 50,
   HISTORY_MAX: 100,
-  // Max total content size sent in one chat_history emit (protects server + client memory)
-  HISTORY_MAX_CHARS: 12 * 1024 * 1024,
+  // Max total UTF-8 bytes of content in one chat_history emit (stays under 10MB)
+  HISTORY_MAX_BYTES: 8 * 1024 * 1024,
 } as const;
 
-const MESSAGE_TYPES: readonly MessageType[] = ['text', 'image', 'file', 'ai'];
+const USER_MESSAGE_TYPES: readonly UserMessageType[] = ['text', 'image', 'file'];
 const ROOM_ID_RE = /^(private|group)_.+$/;
 const DATA_URL_HEADER_RE = /^data:([\w.+-]+\/[\w.+-]+);base64$/;
 const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+
+/** MIME types that browsers can execute (HTML/JS/SVG) are never accepted. */
+const BLOCKED_MIME_TYPES = new Set([
+  'image/svg+xml',
+  'text/html',
+  'application/xhtml+xml',
+  'text/javascript',
+  'application/javascript',
+  'application/x-javascript',
+  'application/ecmascript',
+  'text/ecmascript',
+]);
 
 /** Thrown when client input is invalid; safe to report back to the client. */
 export class MessageValidationError extends Error {
@@ -76,6 +92,12 @@ function base64DecodedBytes(b64: string): number {
   return Math.floor((b64.length * 3) / 4) - padding;
 }
 
+/** Shorten text to `max` characters, adding an ellipsis when cut. */
+function truncate(text: string, max: number): string {
+  const t = typeof text === 'string' ? text.trim() : '';
+  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+}
+
 /** Strip path segments and control characters from a client-provided file name. */
 function sanitizeFileName(name: unknown): string {
   if (typeof name !== 'string') return 'file';
@@ -102,15 +124,17 @@ function validateContent(type: MessageType, raw: unknown): string {
   if (!match?.[1]) throw new MessageValidationError('Attachment must be a Base64 Data URL');
 
   const mime = match[1].toLowerCase();
-  // SVG can embed scripts, so it is never accepted (XSS risk)
-  if (mime === 'image/svg+xml') throw new MessageValidationError('SVG files are not allowed');
+  // Executable content (HTML/JS/SVG) could run scripts in the browser (XSS)
+  if (BLOCKED_MIME_TYPES.has(mime)) throw new MessageValidationError('This file type is not allowed');
   if (type === 'image' && !mime.startsWith('image/')) {
     throw new MessageValidationError('Unsupported image type');
   }
 
   const data = raw.slice(comma + 1);
-  // BASE64_RE requires at least one character, so empty attachments are rejected
-  if (!BASE64_RE.test(data)) throw new MessageValidationError('Attachment is empty or not valid Base64');
+  // Non-empty, Base64 alphabet only, and length a multiple of 4 (well-formed padding)
+  if (!BASE64_RE.test(data) || data.length % 4 !== 0) {
+    throw new MessageValidationError('Attachment is empty or not valid Base64');
+  }
   if (base64DecodedBytes(data) > LIMITS.FILE_MAX_BYTES) {
     throw new MessageValidationError('Attachment is too large (max 7MB)');
   }
@@ -119,7 +143,7 @@ function validateContent(type: MessageType, raw: unknown): string {
 
 // ---------- Mapping ----------
 
-interface MessageRecord {
+export interface MessageRecord {
   _id: unknown;
   roomId: string;
   sender: string;
@@ -132,6 +156,8 @@ interface MessageRecord {
 
 /** Convert a DB record into the ChatMessage contract shared with the client. */
 export function toChatMessage(m: MessageRecord): ChatMessage {
+  // Fallback for docs inserted manually without createdAt: use the ObjectId's creation time
+  const createdAt = m.createdAt ?? (m._id instanceof Types.ObjectId ? m._id.getTimestamp() : new Date(0));
   return {
     id: String(m._id),
     roomId: m.roomId,
@@ -139,8 +165,7 @@ export function toChatMessage(m: MessageRecord): ChatMessage {
     type: m.type,
     content: m.content,
     ...(m.fileName ? { fileName: m.fileName } : {}),
-    // Guard against docs inserted manually without createdAt
-    timestamp: (m.createdAt ?? new Date(0)).toISOString(),
+    timestamp: createdAt.toISOString(),
     readBy: m.readBy ?? [],
   };
 }
@@ -173,27 +198,23 @@ export async function canAccessRoom(roomId: unknown, username: unknown): Promise
 }
 
 /**
- * Validate, authorize and store a message. Returns the saved message ready to
- * broadcast via 'receive_message'.
+ * Validate, authorize and store a message sent by a USER. Returns the saved
+ * message ready to broadcast via 'receive_message'.
+ * Type 'ai' is always rejected here — AI replies go through saveAiMessage().
  * Throws MessageValidationError (bad input) or RoomAccessError (not a member).
  */
 export async function saveMessage(input: NewMessageInput): Promise<ChatMessage> {
   const roomId = validateRoomId(input.roomId);
 
-  if (!MESSAGE_TYPES.includes(input.type)) throw new MessageValidationError('Invalid message type');
+  // Runtime check: the payload comes from the client, so TypeScript types are not enough
+  if (!USER_MESSAGE_TYPES.includes(input.type)) throw new MessageValidationError('Invalid message type');
   const type = input.type;
-  const isAi = type === 'ai';
 
-  // Only the server's AI path may use type 'ai' together with AI_SENDER (anti-spoofing).
-  // AI_SENDER contains a space, so no real user can ever register that name.
-  if (isAi ? input.sender !== AI_SENDER : !isValidUsername(input.sender)) {
-    throw new MessageValidationError('Invalid sender for this message type');
-  }
+  if (!isValidUsername(input.sender)) throw new MessageValidationError('Invalid sender');
   const sender = input.sender;
 
-  // Authorization is enforced here so callers cannot forget it (R7, R11).
-  // The AI bot is not a room member; its replies are triggered by a member's message.
-  if (!isAi && !(await canAccessRoom(roomId, sender))) throw new RoomAccessError();
+  // Authorization is enforced here so callers cannot forget it (R7, R11)
+  if (!(await canAccessRoom(roomId, sender))) throw new RoomAccessError();
 
   const content = validateContent(type, input.content);
   const isAttachment = type === 'image' || type === 'file';
@@ -205,7 +226,28 @@ export async function saveMessage(input: NewMessageInput): Promise<ChatMessage> 
     content,
     ...(isAttachment ? { fileName: sanitizeFileName(input.fileName) } : {}),
     // The sender has obviously read their own message
-    readBy: isAi ? [] : [sender],
+    readBy: [sender],
+  });
+
+  return toChatMessage(doc.toObject() as unknown as MessageRecord);
+}
+
+/**
+ * Store an AI bot reply (server-side only — never call with client data as `content`
+ * without going through the @ai flow). `triggeredBy` is the user who typed "@ai";
+ * they must be a member of the room, so the bot can't be used to post into other rooms.
+ */
+export async function saveAiMessage(roomId: string, content: string, triggeredBy: string): Promise<ChatMessage> {
+  const id = validateRoomId(roomId);
+  if (!(await canAccessRoom(id, triggeredBy))) throw new RoomAccessError();
+
+  const doc = await MessageModel.create({
+    roomId: id,
+    sender: AI_SENDER,
+    type: 'ai',
+    // AI answers can be long: cut to the text limit instead of failing the reply
+    content: validateContent('ai', truncate(content, LIMITS.TEXT_MAX_CHARS)),
+    readBy: [],
   });
 
   return toChatMessage(doc.toObject() as unknown as MessageRecord);
@@ -214,10 +256,14 @@ export async function saveMessage(input: NewMessageInput): Promise<ChatMessage> 
 /**
  * Load the latest messages of a room in chronological order.
  * Uses the { roomId, createdAt } index + lean() for speed, and stops adding
- * older messages once HISTORY_MAX_CHARS is reached so large images can't
- * blow up memory or the socket.
+ * older messages once HISTORY_MAX_BYTES is reached so large images can't blow
+ * up memory or the socket. The newest message is always included; a single
+ * message is already capped at ~9.4MB by validateContent().
  */
-export async function getHistory(roomId: string, opts: { limit?: number } = {}): Promise<ChatMessage[]> {
+export async function getHistory(
+  roomId: string,
+  opts: { limit?: number | undefined } = {},
+): Promise<ChatMessage[]> {
   const id = validateRoomId(roomId);
   const requested = Math.trunc(Number(opts.limit ?? LIMITS.HISTORY_DEFAULT)) || LIMITS.HISTORY_DEFAULT;
   const limit = Math.min(Math.max(requested, 1), LIMITS.HISTORY_MAX);
@@ -230,11 +276,11 @@ export async function getHistory(roomId: string, opts: { limit?: number } = {}):
     .cursor();
 
   const newestFirst: ChatMessage[] = [];
-  let totalChars = 0;
+  let totalBytes = 0;
   try {
     for await (const doc of cursor) {
-      totalChars += doc.content.length;
-      if (totalChars > LIMITS.HISTORY_MAX_CHARS && newestFirst.length > 0) break;
+      totalBytes += Buffer.byteLength(doc.content, 'utf8');
+      if (totalBytes > LIMITS.HISTORY_MAX_BYTES && newestFirst.length > 0) break;
       newestFirst.push(toChatMessage(doc));
     }
   } finally {
