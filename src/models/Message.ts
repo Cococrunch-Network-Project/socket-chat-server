@@ -6,6 +6,8 @@ export const AI_SENDER = 'AI Assistant';
 /**
  * messages collection
  * Stores every chat message for history persistence (Special Point).
+ * Convert documents with toChatMessage() (services/messageService.ts)
+ * before sending them to clients.
  */
 const messageSchema = new Schema(
   {
@@ -28,15 +30,5 @@ const messageSchema = new Schema(
 
 // Compound index so loading a room's history (sorted by time) is fast
 messageSchema.index({ roomId: 1, createdAt: 1 });
-
-// Convert _id -> id and hide internal fields before sending to clients
-messageSchema.set('toJSON', {
-  transform: (_doc, ret: any) => {
-    ret.id = ret._id.toString();
-    delete ret._id;
-    delete ret.__v;
-    return ret;
-  },
-});
 
 export const MessageModel = model('Message', messageSchema);

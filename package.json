@@ -9,7 +9,8 @@
     "test:ai": "tsx src/scripts/testAi.ts",
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
-    "start": "node dist/server.js"
+    "start": "node dist/server.js",
+    "test:history": "tsx src/scripts/testHistory.ts"
   },
   "repository": {
     "type": "git",

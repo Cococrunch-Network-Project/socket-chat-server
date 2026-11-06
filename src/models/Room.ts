@@ -11,7 +11,8 @@ const roomSchema = new Schema(
     // Room type: private (1-on-1) or group
     type: { type: String, enum: ['private', 'group'], required: true },
     // R8, R9: group display name (group rooms only)
-    groupName: { type: String },
+    // Max 94 chars so "group_" + name fits ROOM_ID_MAX (100) in messageService
+    groupName: { type: String, trim: true, maxlength: 94 },
     // R8: username of the group creator
     creator: { type: String },
     // R8–R10: member usernames; a new group starts with [creator] only

@@ -1,5 +1,6 @@
 /**
  * Quick sanity check for the MongoDB connection and models.
+ * Uses throwaway documents and always cleans up, so the real chat data is untouched.
  * Run with: npm run test:db
  */
 import 'dotenv/config';
@@ -8,25 +9,34 @@ import { connectDB } from '../db/connect';
 import { UserModel } from '../models/User';
 import { RoomModel } from '../models/Room';
 import { MessageModel } from '../models/Message';
+import { toChatMessage, type MessageRecord } from '../services/messageService';
+
+const TEST_USER = 'TestUser';
+const TEST_ROOM = 'group_TestDb';
 
 (async () => {
-  await connectDB();
+  try {
+    await connectDB();
 
-  // Upsert so the script can be run repeatedly without duplicate-key errors
-  await UserModel.updateOne({ username: 'Beam' }, { isOnline: true }, { upsert: true });
-  await RoomModel.updateOne(
-    { roomId: 'group_NetProj' },
-    { type: 'group', groupName: 'NetProj', creator: 'Beam', members: ['Beam'] },
-    { upsert: true },
-  );
+    // runValidators: upserts skip schema validation (e.g. username rules) by default
+    await UserModel.updateOne({ username: TEST_USER }, { isOnline: true }, { upsert: true, runValidators: true });
+    await RoomModel.updateOne(
+      { roomId: TEST_ROOM },
+      { type: 'group', groupName: 'TestDb', creator: TEST_USER, members: [TEST_USER] },
+      { upsert: true, runValidators: true },
+    );
+    const msg = await MessageModel.create({ roomId: TEST_ROOM, sender: TEST_USER, content: 'DB test' });
 
-  // Insert one test message and print it in the client-facing JSON shape
-  const msg = await MessageModel.create({ roomId: 'group_NetProj', sender: 'Beam', content: 'DB test' });
-  console.log('Message:', msg.toJSON());
-  console.log('Users:', await UserModel.countDocuments(), '| Rooms:', await RoomModel.countDocuments());
-
-  await mongoose.disconnect();
-})().catch((err) => {
-  console.error('❌', err.message);
-  process.exit(1);
-});
+    // Print in the client-facing ChatMessage shape
+    console.log('Message:', toChatMessage(msg.toObject() as unknown as MessageRecord));
+    console.log('✅ users, rooms and messages collections are writable');
+  } catch (err) {
+    console.error('❌', err instanceof Error ? err.message : err);
+    process.exitCode = 1;
+  } finally {
+    await MessageModel.deleteMany({ roomId: TEST_ROOM }).catch(() => {});
+    await RoomModel.deleteOne({ roomId: TEST_ROOM }).catch(() => {});
+    await UserModel.deleteOne({ username: TEST_USER }).catch(() => {});
+    await mongoose.disconnect();
+  }
+})();

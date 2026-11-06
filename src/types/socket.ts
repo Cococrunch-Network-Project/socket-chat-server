@@ -59,3 +59,12 @@ export const getPrivateRoomId = (userA: string, userB: string): string => {
 export const getGroupRoomId = (groupName: string): string => {
   return `group_${groupName}`;
 };
+
+/**
+ * Per-socket server-side data (socket.data).
+ * `username` MUST be set by the register_user handler on success;
+ * all other handlers trust this value instead of payload.username.
+ */
+export interface SocketData {
+  username?: string;
+}
