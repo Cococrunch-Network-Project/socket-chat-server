@@ -1,11 +1,6 @@
 import type { Socket } from 'socket.io';
-import type { ClientToServerEvents, ServerToClientEvents } from '../types/socket';
-import { canAccessRoom, getHistory } from '../services/messageService';
-
-/** Per-socket data. `username` must be set by register_user on success. */
-export interface SocketData {
-  username?: string;
-}
+import type { ClientToServerEvents, ServerToClientEvents, SocketData } from '../types/socket';
+import { canAccessRoom, getHistory, validateRoomId } from '../services/messageService';
 
 export type ChatSocket = Socket<ClientToServerEvents, ServerToClientEvents, Record<string, never>, SocketData>;
 
@@ -18,13 +13,16 @@ export function registerHistoryHandlers(socket: ChatSocket): void {
     try {
       // Trust the server-side identity, not payload.username (prevents spoofing)
       const username = socket.data.username;
-      const roomId = payload?.roomId;
-      if (!username || !(await canAccessRoom(roomId, username))) return;
+      if (!username) return;
+
+      // Validate and authorize BEFORE joining, so sockets never end up in junk rooms
+      const roomId = validateRoomId(payload?.roomId);
+      if (!(await canAccessRoom(roomId, username))) return;
 
       await socket.join(roomId);
       socket.emit('chat_history', await getHistory(roomId));
     } catch (err) {
-      console.error('[join_room] failed:', err);
+      console.error('[join_room] failed:', err instanceof Error ? err.message : err);
     }
   });
 }
