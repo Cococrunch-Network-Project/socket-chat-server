@@ -6,16 +6,29 @@ type ChatSocket = Socket<ClientToServerEvents, ServerToClientEvents, Record<stri
 export interface TypingOptions {
   /** Auto-send "stopped typing" if the client goes quiet for this long (ms). */
   timeoutMs?: number;
+  /** Minimum gap between two broadcasts for the same room (ms). */
+  minIntervalMs?: number;
 }
 
 const DEFAULT_TIMEOUT_MS = 5_000;
+const DEFAULT_MIN_INTERVAL_MS = 300;
+const ROOM_ID_RE = /^(private|group)_.{1,94}$/;
+
+/** Typing state of THIS socket in one room. */
+interface RoomTypingState {
+  wanted: boolean; // latest state the client asked for
+  sent: boolean; // last state broadcast to the room
+  lastSentAt: number;
+  autoStop?: ReturnType<typeof setTimeout> | undefined;
+  flush?: ReturnType<typeof setTimeout> | undefined;
+}
 
 /**
  * Task 2.4 — Typing Indicator (Special Point).
  * Relays 'typing' to the other people in the room in real time. Nothing is stored in the DB.
  *
- * - Only emits when the state changes (start/stop), so a client sending
- *   isTyping:true on every keystroke does not flood the room.
+ * - Only state changes are broadcast, at most once per `minIntervalMs` per room;
+ *   rapid true/false toggling is collapsed and the LATEST state is always delivered.
  * - Auto-stops after `timeoutMs` without a refresh, and on disconnect,
  *   so nobody is left "typing..." forever if a tab is closed.
  * - Only works for rooms this socket has joined via 'join_room'
@@ -25,15 +38,43 @@ const DEFAULT_TIMEOUT_MS = 5_000;
  */
 export function registerTypingHandlers(socket: ChatSocket, options: TypingOptions = {}): void {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  /** roomId -> auto-stop timer, for rooms where this user is currently typing */
-  const activeTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const minIntervalMs = options.minIntervalMs ?? DEFAULT_MIN_INTERVAL_MS;
+  // Entries are kept (not deleted when idle) so the throttle remembers lastSentAt;
+  // size is bounded by the rooms this socket has joined, and it is cleared on disconnect.
+  const rooms = new Map<string, RoomTypingState>();
 
-  const stopTyping = (roomId: string, username: string) => {
-    const timer = activeTimers.get(roomId);
-    if (!timer) return; // not typing: nothing to announce
-    clearTimeout(timer);
-    activeTimers.delete(roomId);
-    socket.to(roomId).emit('typing', { roomId, username, isTyping: false });
+  /** Broadcast the wanted state now, or schedule it if we broadcast too recently. */
+  const sync = (roomId: string, username: string) => {
+    const state = rooms.get(roomId);
+    if (!state || state.wanted === state.sent || state.flush) return;
+
+    const wait = state.lastSentAt + minIntervalMs - Date.now();
+    if (wait > 0) {
+      state.flush = setTimeout(() => {
+        state.flush = undefined;
+        sync(roomId, username);
+      }, wait);
+      return;
+    }
+
+    state.sent = state.wanted;
+    state.lastSentAt = Date.now();
+    // socket.to() sends to everyone in the room except the sender
+    socket.to(roomId).emit('typing', { roomId, username, isTyping: state.sent });
+  };
+
+  const setTyping = (roomId: string, username: string, isTyping: boolean) => {
+    let state = rooms.get(roomId);
+    if (!state) {
+      if (!isTyping) return; // was not typing: nothing to announce
+      state = { wanted: false, sent: false, lastSentAt: 0 };
+      rooms.set(roomId, state);
+    }
+
+    clearTimeout(state.autoStop);
+    state.autoStop = isTyping ? setTimeout(() => setTyping(roomId, username, false), timeoutMs) : undefined;
+    state.wanted = isTyping;
+    sync(roomId, username);
   };
 
   socket.on('typing', (payload) => {
@@ -43,25 +84,21 @@ export function registerTypingHandlers(socket: ChatSocket, options: TypingOption
 
     const { roomId, isTyping } = payload;
     if (typeof roomId !== 'string' || typeof isTyping !== 'boolean') return;
-    if (!socket.rooms.has(roomId)) return; // must have joined the room first (R7, R11)
+    // Must be a chat room id (not e.g. the socket's own id room) that this socket joined (R7, R11)
+    if (!ROOM_ID_RE.test(roomId) || !socket.rooms.has(roomId)) return;
 
-    if (!isTyping) {
-      stopTyping(roomId, username);
-      return;
-    }
-
-    const existing = activeTimers.get(roomId);
-    if (existing) clearTimeout(existing);
-    activeTimers.set(roomId, setTimeout(() => stopTyping(roomId, username), timeoutMs));
-
-    // socket.to() sends to everyone in the room except the sender
-    if (!existing) socket.to(roomId).emit('typing', { roomId, username, isTyping: true });
+    setTyping(roomId, username, isTyping);
   });
 
   // 'disconnecting' fires while socket.rooms is still populated
   socket.on('disconnecting', () => {
     const username = socket.data.username;
-    if (!username) return;
-    for (const roomId of [...activeTimers.keys()]) stopTyping(roomId, username);
+    for (const [roomId, state] of rooms) {
+      // Always clear timers, even if no announcement can be made
+      clearTimeout(state.autoStop);
+      clearTimeout(state.flush);
+      if (username && state.sent) socket.to(roomId).emit('typing', { roomId, username, isTyping: false });
+    }
+    rooms.clear();
   });
 }
