@@ -6,19 +6,28 @@ import { MessageModel } from '../models/Message';
  */
 
 export const AI_CONFIG = {
-  defaultModel: 'gemini-3.8-flash',
-  timeoutMs: 20_000,
-  maxRetries: 2, // per model, only for temporary errors (429/5xx/timeout)
+  defaultModel: 'gemini-3.5-flash-lite',
+  timeoutMs: 30_000,
+  maxRetries: 1, // per model, only for temporary errors (429/5xx/timeout); keeps worst case ~1 min
   contextMessages: 10, // recent text messages sent as conversation context
   contextCharsPerMessage: 500,
 } as const;
 
 const SYSTEM_INSTRUCTION = [
   'You are "AI Assistant", a helpful bot inside a real-time chat application.',
-  'Reply in the same language as the question (Thai or English).',
   'Keep answers short and clear (under 150 words) unless the user asks for detail.',
   'Use plain text: no tables, no headings.',
 ].join(' ');
+
+const THAI_CHAR_RE = /[\u0E00-\u0E7F]/;
+
+/**
+ * Decide the reply language in code instead of trusting the model:
+ * any Thai character in the question -> Thai, otherwise English.
+ */
+export function replyLanguage(question: string): 'Thai' | 'English' {
+  return THAI_CHAR_RE.test(question) ? 'Thai' : 'English';
+}
 
 /** Matches "@ai" at the start of a message, e.g. "@ai what is TCP?" */
 const AI_TRIGGER_RE = /^@ai(?:\s+|$)/i;
@@ -40,8 +49,8 @@ export function extractAiPrompt(text: unknown): string | null {
 async function createClient() {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error('GEMINI_API_KEY is not set in .env');
-  const { GoogleGenAI } = await import('@google/genai');
-  return new GoogleGenAI({ apiKey });
+  const { GoogleGenAI, ThinkingLevel } = await import('@google/genai');
+  return { ai: new GoogleGenAI({ apiKey }), ThinkingLevel };
 }
 
 let clientPromise: ReturnType<typeof createClient> | null = null;
@@ -132,15 +141,19 @@ export async function loadAiContext(roomId: string, excludeMessageId?: string): 
  * Throws the last error if every attempt fails.
  */
 export async function askGemini(question: string, context = ''): Promise<string> {
-  const ai = await getClient();
+  const { ai, ThinkingLevel } = await getClient();
   // Read env at call time so it works no matter when dotenv is loaded.
   // GEMINI_FALLBACK_MODEL is optional: a second model to try when the main one is overloaded.
   const models = [process.env.GEMINI_MODEL || AI_CONFIG.defaultModel, process.env.GEMINI_FALLBACK_MODEL || ''].filter(
     (m, i, all) => m.length > 0 && all.indexOf(m) === i,
   );
-  const contents = context
-    ? `Recent chat messages:\n${context}\n\nQuestion: ${question}`
-    : question;
+  // Explicit instruction next to the question; the chat context may be in another language
+  const language = replyLanguage(question);
+  const contents = [
+    context ? `Recent chat messages (for context only):\n${context}\n` : '',
+    `Question: ${question}`,
+    `Answer in ${language} only.`,
+  ].join('\n');
 
   let lastError: unknown = new Error('No Gemini model configured');
   for (const model of models) {
@@ -151,7 +164,13 @@ export async function askGemini(question: string, context = ''): Promise<string>
             ai.models.generateContent({
               model,
               contents,
-              config: { systemInstruction: SYSTEM_INSTRUCTION, temperature: 0.7, abortSignal },
+              config: {
+                systemInstruction: SYSTEM_INSTRUCTION,
+                temperature: 0.7,
+                // Chat answers don't need deep reasoning; low thinking = much faster replies
+                thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+                abortSignal,
+              },
             }),
           AI_CONFIG.timeoutMs,
         );

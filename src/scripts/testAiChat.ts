@@ -9,7 +9,7 @@ import { connectDB } from '../db/connect';
 import { MessageModel, AI_SENDER } from '../models/Message';
 import { RoomModel } from '../models/Room';
 import { saveMessage } from '../services/messageService';
-import { extractAiPrompt } from '../services/aiService';
+import { extractAiPrompt, replyLanguage } from '../services/aiService';
 import { handleAiMention, BUSY_TEXT, HELP_TEXT, type ChatServer } from '../socket/aiHandlers';
 
 const ROOM = 'group_TestAi';
@@ -37,7 +37,7 @@ function createFakeIo() {
 async function run() {
   await RoomModel.updateOne(
     { roomId: ROOM },
-    { type: 'group', groupName: 'TestAi', creator: 'Beam', members: ['Beam'] },
+    { type: 'group', groupName: 'TestAi', creator: 'Beam', members: ['Beam', 'Mail'] },
     { upsert: true, runValidators: true },
   );
 
@@ -47,6 +47,8 @@ async function run() {
   check('"@ai" alone -> empty question', extractAiPrompt('@ai') === '');
   check('"@aim" is not a trigger', extractAiPrompt('@aim high') === null);
   check('normal text is not a trigger', extractAiPrompt('hello @ai') === null);
+  check('Thai question -> Thai reply', replyLanguage('TCP คืออะไร') === 'Thai');
+  check('English question -> English reply', replyLanguage('What is TCP?') === 'English');
 
   // --- Full flow: user asks, AI answers in the same room
   const { io, events } = createFakeIo();
@@ -60,6 +62,7 @@ async function run() {
   check('typing indicator uses the AI name', typing.every((e) => e.payload.username === AI_SENDER));
   check('reply was broadcast to the same room', replyEvent?.room === ROOM);
   check('reply has AI sender and type', replyEvent?.payload.sender === AI_SENDER && replyEvent?.payload.type === 'ai');
+  check('English question got an English answer (no Thai characters)', !/[\u0E00-\u0E7F]/.test(String(replyEvent?.payload.content)));
   console.log('   AI answer:', replyEvent?.payload.content);
   check(
     'Gemini really answered (not the busy/help fallback)',
@@ -68,16 +71,24 @@ async function run() {
       replyEvent.payload.content !== HELP_TEXT,
   );
   check('reply is saved in the database', (await MessageModel.countDocuments({ roomId: ROOM, type: 'ai' })) === 1);
+  const before = events.length;
 
   // --- Non-trigger and cooldown
-  const before = events.length;
   const normal = await saveMessage({ roomId: ROOM, sender: 'Beam', type: 'text', content: 'just chatting' });
   await handleAiMention(io, normal);
   check('normal message does not trigger the AI', events.length === before);
 
-  const again = await saveMessage({ roomId: ROOM, sender: 'Beam', type: 'text', content: '@ai again' });
+  // Use a fresh user: "@ai" alone answers instantly (help text, no Gemini call),
+  // so the second question is guaranteed to arrive within the 5s cooldown
+  const help = await saveMessage({ roomId: ROOM, sender: 'Mail', type: 'text', content: '@ai' });
+  await handleAiMention(io, help);
+  const helpReply = events.filter((e) => e.event === 'receive_message').at(-1);
+  check('"@ai" alone replies with the help text', helpReply?.payload.content === HELP_TEXT);
+
+  const afterHelp = events.length;
+  const again = await saveMessage({ roomId: ROOM, sender: 'Mail', type: 'text', content: '@ai again' });
   await handleAiMention(io, again);
-  check('cooldown blocks a second question within 5s', events.length === before);
+  check('cooldown blocks a second question within 5s', events.length === afterHelp);
 }
 
 (async () => {
