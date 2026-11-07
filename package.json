@@ -11,7 +11,6 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "test:history": "tsx src/scripts/testHistory.ts",
-    "test:ai-chat": "tsx src/scripts/testAiChat.ts",
     "test:typing": "tsx src/scripts/testTyping.ts"
   },
   "repository": {

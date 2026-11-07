@@ -14,6 +14,7 @@ type Client = ClientSocket<ServerToClientEvents, ClientToServerEvents>;
 type TypingEvent = { roomId: string; username: string; isTyping: boolean };
 
 const ROOM = 'group_TestTyping';
+const LOBBY = 'lobby'; // joined by both clients but not a valid chat room id
 const TIMEOUT_MS = 800; // short auto-stop so the test runs fast
 const MIN_INTERVAL_MS = 100;
 let failed = 0;
@@ -40,7 +41,8 @@ async function main() {
   io.on('connection', (socket) => {
     const name = socket.handshake.auth.username;
     if (typeof name === 'string' && name) socket.data.username = name;
-    if (socket.handshake.auth.joinRoom) void socket.join(ROOM);
+    // Also join a non-chat room so we can prove the room-id format check works
+    if (socket.handshake.auth.joinRoom) void socket.join([ROOM, LOBBY]);
     registerTypingHandlers(socket, { timeoutMs: TIMEOUT_MS, minIntervalMs: MIN_INTERVAL_MS });
   });
   await new Promise<void>((resolve) => httpServer.listen(0, resolve));
@@ -99,10 +101,11 @@ async function main() {
     await sleep(200);
     check('non-member, unregistered and invalid payloads are ignored', mailEvents.length === 0);
 
-    // 6. typing into the socket's own id room (always in socket.rooms) is ignored
-    beam.emit('typing', { roomId: beam.id ?? '', username: 'Beam', isTyping: true });
+    // 6. a joined room whose id is not private_/group_ is ignored (Mail is in it,
+    //    so without the format check Mail WOULD receive this event)
+    beam.emit('typing', { roomId: LOBBY, username: 'Beam', isTyping: true });
     await sleep(150);
-    check("socket's own id room is not accepted as a chat room", mailEvents.length === 0);
+    check('non-chat room ids are rejected', mailEvents.length === 0);
 
     // 7. rapid toggling is throttled, and the final state still arrives
     for (let i = 0; i < 20; i++) {
