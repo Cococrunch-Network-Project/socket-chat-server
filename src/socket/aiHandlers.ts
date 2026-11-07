@@ -7,8 +7,8 @@ import { askGemini, extractAiPrompt, loadAiContext } from '../services/aiService
 export type ChatServer = Server<ClientToServerEvents, ServerToClientEvents, Record<string, never>, SocketData>;
 
 const USER_COOLDOWN_MS = 5_000; // one @ai question per user every 5s (protects the API quota)
-const HELP_TEXT = 'Type @ai followed by your question, e.g. "@ai what is TCP?"';
-const BUSY_TEXT = 'Sorry, the AI is busy right now. Please try again in a moment.';
+export const HELP_TEXT = 'Type @ai followed by your question, e.g. "@ai what is TCP?"';
+export const BUSY_TEXT = 'Sorry, the AI is busy right now. Please try again in a moment.';
 
 /** Rooms where the AI is currently answering (one answer at a time per room). */
 const busyRooms = new Set<string>();
@@ -35,16 +35,17 @@ export async function handleAiMention(io: ChatServer, message: ChatMessage): Pro
     return;
   }
 
-  busyRooms.add(roomId);
-  lastAskAt.set(sender, now);
-  if (lastAskAt.size > 1000) pruneCooldowns(now);
-
   // Reuse the 'typing' event so the client can show "AI Assistant is typing..."
   const setTyping = (isTyping: boolean) =>
     io.to(roomId).emit('typing', { roomId, username: AI_SENDER, isTyping });
-  setTyping(true);
 
   try {
+    // Inside try so the finally block always releases the room lock
+    busyRooms.add(roomId);
+    lastAskAt.set(sender, now);
+    if (lastAskAt.size > 1000) pruneCooldowns(now);
+    setTyping(true);
+
     let answer = HELP_TEXT;
     if (question) {
       try {
@@ -61,8 +62,12 @@ export async function handleAiMention(io: ChatServer, message: ChatMessage): Pro
   } catch (err) {
     console.error('[ai] could not send reply:', err instanceof Error ? err.message : err);
   } finally {
-    setTyping(false);
     busyRooms.delete(roomId);
+    try {
+      setTyping(false);
+    } catch {
+      // Ignore: nothing else to clean up
+    }
   }
 }
 

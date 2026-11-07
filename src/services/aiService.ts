@@ -64,12 +64,24 @@ class AiTimeoutError extends Error {
   }
 }
 
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+/**
+ * Run `task` with an AbortSignal that fires after `ms`. The signal is passed to
+ * the SDK so the HTTP request is really cancelled (not just ignored) on timeout.
+ */
+async function withTimeout<T>(task: (signal: AbortSignal) => Promise<T>, ms: number): Promise<T> {
+  const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new AiTimeoutError()), ms);
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new AiTimeoutError());
+    }, ms);
   });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  try {
+    return await Promise.race([task(controller.signal), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** HTTP status from a Gemini SDK error (from `status`, or the JSON in the message). */
@@ -135,11 +147,12 @@ export async function askGemini(question: string, context = ''): Promise<string>
     for (let attempt = 0; attempt <= AI_CONFIG.maxRetries; attempt++) {
       try {
         const res = await withTimeout(
-          ai.models.generateContent({
-            model,
-            contents,
-            config: { systemInstruction: SYSTEM_INSTRUCTION, temperature: 0.7 },
-          }),
+          (abortSignal) =>
+            ai.models.generateContent({
+              model,
+              contents,
+              config: { systemInstruction: SYSTEM_INSTRUCTION, temperature: 0.7, abortSignal },
+            }),
           AI_CONFIG.timeoutMs,
         );
         const text = res.text?.trim();

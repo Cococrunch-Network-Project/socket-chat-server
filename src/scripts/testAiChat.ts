@@ -10,7 +10,7 @@ import { MessageModel, AI_SENDER } from '../models/Message';
 import { RoomModel } from '../models/Room';
 import { saveMessage } from '../services/messageService';
 import { extractAiPrompt } from '../services/aiService';
-import { handleAiMention, type ChatServer } from '../socket/aiHandlers';
+import { handleAiMention, BUSY_TEXT, HELP_TEXT, type ChatServer } from '../socket/aiHandlers';
 
 const ROOM = 'group_TestAi';
 let failed = 0;
@@ -61,6 +61,12 @@ async function run() {
   check('reply was broadcast to the same room', replyEvent?.room === ROOM);
   check('reply has AI sender and type', replyEvent?.payload.sender === AI_SENDER && replyEvent?.payload.type === 'ai');
   console.log('   AI answer:', replyEvent?.payload.content);
+  check(
+    'Gemini really answered (not the busy/help fallback)',
+    typeof replyEvent?.payload.content === 'string' &&
+      replyEvent.payload.content !== BUSY_TEXT &&
+      replyEvent.payload.content !== HELP_TEXT,
+  );
   check('reply is saved in the database', (await MessageModel.countDocuments({ roomId: ROOM, type: 'ai' })) === 1);
 
   // --- Non-trigger and cooldown
