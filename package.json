@@ -10,7 +10,8 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
-    "test:history": "tsx src/scripts/testHistory.ts"
+    "test:history": "tsx src/scripts/testHistory.ts",
+    "test:ai-chat": "tsx src/scripts/testAiChat.ts"
   },
   "repository": {
     "type": "git",
