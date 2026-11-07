@@ -12,6 +12,8 @@ export interface TypingOptions {
 
 const DEFAULT_TIMEOUT_MS = 5_000;
 const DEFAULT_MIN_INTERVAL_MS = 300;
+// The UI expires stale indicators after 4.5s; relay occasional client refreshes.
+const REFRESH_INTERVAL_MS = 1_500;
 const ROOM_ID_RE = /^(private|group)_.{1,94}$/;
 
 /** Typing state of THIS socket in one room. */
@@ -27,7 +29,7 @@ interface RoomTypingState {
  * Task 2.4 — Typing Indicator (Special Point).
  * Relays 'typing' to the other people in the room in real time. Nothing is stored in the DB.
  *
- * - Only state changes are broadcast, at most once per `minIntervalMs` per room;
+ * - State changes and occasional active refreshes are broadcast, at most once per `minIntervalMs` per room;
  *   rapid true/false toggling is collapsed and the LATEST state is always delivered.
  * - Auto-stops after `timeoutMs` without a refresh, and on disconnect,
  *   so nobody is left "typing..." forever if a tab is closed.
@@ -46,7 +48,9 @@ export function registerTypingHandlers(socket: ChatSocket, options: TypingOption
   /** Broadcast the wanted state now, or schedule it if we broadcast too recently. */
   const sync = (roomId: string, username: string) => {
     const state = rooms.get(roomId);
-    if (!state || state.wanted === state.sent || state.flush) return;
+    if (!state || state.flush) return;
+    const refreshDue = state.wanted && state.sent && Date.now() - state.lastSentAt >= REFRESH_INTERVAL_MS;
+    if (state.wanted === state.sent && !refreshDue) return;
 
     const wait = state.lastSentAt + minIntervalMs - Date.now();
     if (wait > 0) {

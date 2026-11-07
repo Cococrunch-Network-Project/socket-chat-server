@@ -9,6 +9,7 @@ import { Server } from 'socket.io';
 import { io as connect, type Socket as ClientSocket } from 'socket.io-client';
 import type { ClientToServerEvents, ServerToClientEvents, SocketData } from '../types/socket';
 import { registerTypingHandlers } from '../socket/typingHandlers';
+import { setupSocketHandlers } from '../socket/socketHandler';
 
 type Client = ClientSocket<ServerToClientEvents, ClientToServerEvents>;
 type TypingEvent = { roomId: string; username: string; isTyping: boolean };
@@ -43,7 +44,8 @@ async function main() {
     if (typeof name === 'string' && name) socket.data.username = name;
     // Also join a non-chat room so we can prove the room-id format check works
     if (socket.handshake.auth.joinRoom) void socket.join([ROOM, LOBBY]);
-    registerTypingHandlers(socket, { timeoutMs: TIMEOUT_MS, minIntervalMs: MIN_INTERVAL_MS });
+    if (name === 'Integration') setupSocketHandlers(io, socket);
+    else registerTypingHandlers(socket, { timeoutMs: TIMEOUT_MS, minIntervalMs: MIN_INTERVAL_MS });
   });
   await new Promise<void>((resolve) => httpServer.listen(0, resolve));
   const url = `http://localhost:${(httpServer.address() as AddressInfo).port}`;
@@ -58,6 +60,7 @@ async function main() {
   const mail = await open({ username: 'Mail', joinRoom: true });
   const outsider = await open({ username: 'Bird', joinRoom: false });
   const anonymous = await open({ joinRoom: true }); // never registered
+  const integration = await open({ username: 'Integration', joinRoom: true });
   const mailEvents = record(mail);
   const beamEvents = record(beam);
 
@@ -122,8 +125,22 @@ async function main() {
     beam.disconnect();
     await sleep(200);
     check('disconnect while typing sends "typing: false"', mailEvents.length === 2 && mailEvents.at(-1)?.isTyping === false);
+
+    // 9. A sustained stream refreshes the UI without broadcasting every keystroke.
+    mailEvents.length = 0;
+    for (let i = 0; i < 10; i++) {
+      integration.emit('typing', { roomId: ROOM, username: 'Spoofed', isTyping: true });
+      await sleep(200);
+    }
+    check('core setup registers exactly one throttled typing handler', mailEvents.length === 2);
+    check('sustained typing refreshes carry the registered identity', mailEvents.every(e => e.isTyping && e.username === 'Integration'));
+    integration.emit('typing', { roomId: ROOM, username: 'Integration', isTyping: false });
+    await sleep(350);
+    check('core setup relays the final stop once', mailEvents.length === 3 && mailEvents.at(-1)?.isTyping === false);
   } finally {
-    for (const c of [beam, mail, outsider, anonymous]) c.disconnect();
+    // This fixture has no DB: avoid the unrelated user-persistence disconnect handler.
+    for (const socket of io.sockets.sockets.values()) socket.removeAllListeners('disconnect');
+    for (const c of [beam, mail, outsider, anonymous, integration]) c.disconnect();
     await io.close();
   }
 }
