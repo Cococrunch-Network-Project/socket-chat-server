@@ -1,3 +1,4 @@
+﻿import { broadcastPresence, releaseUsername, reserveUsername } from './presence.js';
 import { Server, Socket } from 'socket.io';
 import { ClientToServerEvents, ServerToClientEvents, SocketData } from '../types/socket';
 
@@ -10,40 +11,58 @@ export const setupSocketHandlers = (
   socket: Socket<ClientToServerEvents, ServerToClientEvents, Record<string, never>, SocketData>
 ) => {
 
+  let registering = false;
   socket.on('register_user', async (payload, callback) => {
-    // เช็กกฎการตั้งชื่ออย่างเข้มงวดด้วย Regex ของเพื่อน
-    if (!isValidUsername(payload.username)) {
-      return callback({ success: false, message: 'Invalid username format. Must contain at least 1 letter/digit, no spaces, and no underscores.' });
+    const username = payload?.username;
+    if (!isValidUsername(username)) {
+      return callback({ success: false, message: 'Invalid username format.' });
     }
-
+    if (registering || (socket.data.username && socket.data.username !== username)) {
+      return callback({ success: false, message: 'Please finish signing in or log out before changing usernames.' });
+    }
+    if (!reserveUsername(io, username, socket.id)) {
+      return callback({ success: false, message: 'ชื่อนี้มีคนใช้แล้ว กรุณาตั้งชื่อใหม่' });
+    }
+    registering = true;
     try {
       await UserModel.updateOne(
-        { username: payload.username },
+        { username },
         { $set: { isOnline: true, socketId: socket.id } },
-        { upsert: true, runValidators: true } // runValidators สำคัญมากสำหรับการ Upsert
+        { upsert: true, runValidators: true }
       );
+      // A tab can close while the database write is pending.
+      if (!socket.connected) {
+        await UserModel.updateOne(
+          { username, socketId: socket.id },
+          { $set: { isOnline: false, socketId: null, lastSeen: new Date() } }
+        );
+        releaseUsername(io, username, socket.id);
+        return;
+      }
+      socket.data.username = username;
+    } catch (err: unknown) {
+      releaseUsername(io, username, socket.id);
+      if (socket.connected) callback({ success: false, message: err instanceof Error ? err.message : 'Registration failed' });
+      return;
+    } finally {
+      registering = false;
+    }
 
-      // ผูก Session ตัวตนไว้กับ Socket ทันทีเมื่อลงทะเบียนผ่าน
-      socket.data.username = payload.username;
-      
-      callback({ success: true, message: 'OK' });
-
-      // ดึงรายชื่อคนออนไลน์ล่าสุดส่งให้ทุกคน
-      const onlineUsers = (await UserModel.find({ isOnline: true }).select('username')).map(u => u.username);
-      io.emit('users_updated', onlineUsers);
-
+    callback({ success: true, message: 'OK' });
+    broadcastPresence(io);
+    // A group-query failure must not send a second registration callback.
+    try {
       const allGroups = await RoomModel.find({ type: 'group' });
-      socket.emit('groups_updated', allGroups.map(g => ({
+      if (socket.connected) socket.emit('groups_updated', allGroups.map(g => ({
         roomId: g.roomId,
         groupName: g.groupName || '',
         creator: g.creator || '',
         members: g.members
       })));
-    } catch (err: any) {
-      callback({ success: false, message: err.message || 'Registration failed' });
+    } catch (err) {
+      console.error('Load groups error:', err);
     }
   });
-
   socket.on('create_group', async (payload) => {
     if (!socket.data.username) return;
     if (payload.groupName.length > 94) return; // ป้องกันชื่อห้องยาวเกิน Limit
@@ -131,10 +150,19 @@ export const setupSocketHandlers = (
   });
 
   socket.on('disconnect', async () => {
-    if (socket.data.username) {
-      await UserModel.updateOne({ username: socket.data.username }, { $set: { isOnline: false } });
-      const onlineUsers = (await UserModel.find({ isOnline: true }).select('username')).map(u => u.username);
-      io.emit('users_updated', onlineUsers);
+    const username = socket.data.username;
+    if (!username) return;
+    releaseUsername(io, username, socket.id);
+    // Broadcast immediately; slow/failed database writes cannot delay presence.
+    broadcastPresence(io);
+    try {
+      // An old connection must never mark a newer connection offline.
+      await UserModel.updateOne(
+        { username, socketId: socket.id },
+        { $set: { isOnline: false, socketId: null, lastSeen: new Date() } }
+      );
+    } catch (err) {
+      console.error('Persist disconnect error:', err);
     }
   });
 };
