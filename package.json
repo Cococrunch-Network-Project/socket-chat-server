@@ -11,6 +11,7 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "test:history": "tsx src/scripts/testHistory.ts",
+    "test:typing": "tsx src/scripts/testTyping.ts",
     "test:ai-chat": "tsx src/scripts/testAiChat.ts"
   },
   "repository": {
@@ -29,6 +30,7 @@
     "@types/cors": "^2.8.19",
     "@types/express": "^4.17.25",
     "@types/node": "^26.6.6",
+    "socket.io-client": "^4.8.4",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   },

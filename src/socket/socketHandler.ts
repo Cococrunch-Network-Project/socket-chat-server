@@ -5,6 +5,7 @@ import { ClientToServerEvents, ServerToClientEvents, SocketData } from '../types
 import { UserModel, isValidUsername } from '../models/User.js';
 import { RoomModel } from '../models/Room.js';
 import { saveMessage } from '../services/messageService.js';
+import { registerTypingHandlers } from './typingHandlers.js';
 
 export const setupSocketHandlers = (
   io: Server<ClientToServerEvents, ServerToClientEvents, Record<string, never>, SocketData>,
@@ -139,10 +140,8 @@ export const setupSocketHandlers = (
     }
   });
 
-  socket.on('typing', (payload) => {
-    if (!socket.data.username) return;
-    socket.to(payload.roomId).emit('typing', { ...payload, username: socket.data.username });
-  });
+  // Register exactly one typing handler; it validates rooms and manages timers.
+  registerTypingHandlers(socket);
 
   socket.on('mark_read', async (payload) => {
     if (!socket.data.username) return;
