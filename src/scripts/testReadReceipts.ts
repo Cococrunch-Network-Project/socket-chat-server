@@ -37,9 +37,16 @@ async function rejects(name: string, fn: () => Promise<unknown>, errorClass: new
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Wait until `events` has at least `count` items (or time out), instead of a fixed sleep. */
+async function waitForCount(events: unknown[], count: number, timeoutMs = 5000) {
+  const start = Date.now();
+  while (events.length < count && Date.now() - start < timeoutMs) await sleep(25);
+}
 const readByOf = async (id: string) => ((await MessageModel.findById(id).lean())?.readBy ?? []) as string[];
 
 async function testService() {
+  await MessageModel.deleteMany({ roomId: ROOM }); // leftovers from an interrupted run
   const m1 = await saveMessage({ roomId: ROOM, sender: 'Beam', type: 'text', content: 'hello' });
   const m2 = await saveMessage({ roomId: ROOM, sender: 'Beam', type: 'text', content: 'are you there?' });
 
@@ -57,12 +64,19 @@ async function testService() {
 async function testHandler() {
   const httpServer = createServer();
   const io = new Server<ClientToServerEvents, ServerToClientEvents, Record<string, never>, SocketData>(httpServer);
+  // Count real DB calls so the coalescing test checks the work, not just the broadcasts
+  let markReadCalls = 0;
+  const countingMarkRead: typeof markRead = (roomId, username) => {
+    markReadCalls++;
+    return markRead(roomId, username);
+  };
+
   // auth.username stands in for register_user, joinRoom for join_room (other handlers' jobs)
   io.on('connection', (socket) => {
     const name = socket.handshake.auth.username;
     if (typeof name === 'string' && name) socket.data.username = name;
     if (socket.handshake.auth.joinRoom) void socket.join(ROOM);
-    registerReadHandlers(socket);
+    registerReadHandlers(socket, { markReadFn: countingMarkRead });
   });
   await new Promise<void>((resolve) => httpServer.listen(0, resolve));
   const url = `http://localhost:${(httpServer.address() as AddressInfo).port}`;
@@ -76,16 +90,21 @@ async function testHandler() {
   const beam = await open({ username: 'Beam', joinRoom: true });
   const mail = await open({ username: 'Mail', joinRoom: true });
   const bird = await open({ username: 'Bird', joinRoom: false });
+  const mailNotJoined = await open({ username: 'Mail', joinRoom: false }); // DB member who skipped join_room
   const beamEvents: ReadEvent[] = [];
+  const mailEvents: ReadEvent[] = [];
   beam.on('messages_read', (e) => beamEvents.push(e));
+  mail.on('messages_read', (e) => mailEvents.push(e));
 
   try {
     await MessageModel.deleteMany({ roomId: ROOM });
     const msg = await saveMessage({ roomId: ROOM, sender: 'Beam', type: 'text', content: 'ping' });
 
     mail.emit('mark_read', { roomId: ROOM, username: 'Mail' });
-    await sleep(500);
+    await waitForCount(beamEvents, 1);
+    await waitForCount(mailEvents, 1);
     check('sender receives "messages_read" with the reader name', beamEvents.length === 1 && beamEvents[0]?.username === 'Mail');
+    check('reader also receives its own receipt (all its tabs stay in sync)', mailEvents.length === 1);
     check('receipt is stored in the DB (survives refresh)', (await readByOf(msg.id)).includes('Mail'));
 
     mail.emit('mark_read', { roomId: ROOM, username: 'Mail' });
@@ -93,9 +112,12 @@ async function testHandler() {
     check('re-opening an already read room does not broadcast again', beamEvents.length === 1);
 
     await saveMessage({ roomId: ROOM, sender: 'Beam', type: 'text', content: 'pong' });
+    markReadCalls = 0;
     for (let i = 0; i < 10; i++) mail.emit('mark_read', { roomId: ROOM, username: 'Mail' });
-    await sleep(800);
+    await waitForCount(beamEvents, 2);
+    await sleep(500); // let any follow-up run finish
     check('10 rapid mark_read calls produce one broadcast', beamEvents.length === 2);
+    check('10 rapid mark_read calls run the DB update at most twice', markReadCalls >= 1 && markReadCalls <= 2);
 
     beamEvents.length = 0;
     await saveMessage({ roomId: ROOM, sender: 'Beam', type: 'text', content: 'secret' });
@@ -104,13 +126,17 @@ async function testHandler() {
     await sleep(500);
     check('non-member and invalid payloads are ignored', beamEvents.length === 0);
 
+    mailNotJoined.emit('mark_read', { roomId: ROOM, username: 'Mail' });
+    await sleep(500);
+    check('member who has not joined the room via join_room is ignored', beamEvents.length === 0);
+
     // Beam has something unread (a message from Mail) and tries to mark it as "Mail"
     await saveMessage({ roomId: ROOM, sender: 'Mail', type: 'text', content: 'hi Beam' });
     beam.emit('mark_read', { roomId: ROOM, username: 'Mail' });
-    await sleep(500);
+    await waitForCount(beamEvents, 1);
     check('payload username is ignored (uses server identity)', beamEvents.length === 1 && beamEvents[0]?.username === 'Beam');
   } finally {
-    for (const c of [beam, mail, bird]) c.disconnect();
+    for (const c of [beam, mail, bird, mailNotJoined]) c.disconnect();
     await io.close();
   }
 }
