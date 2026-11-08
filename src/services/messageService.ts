@@ -10,6 +10,7 @@ import { getPrivateRoomId, type ChatMessage } from '../types/socket';
  * - saveAiMessage(): store an AI bot reply (server-side only, for Task 2.3)
  * - getHistory():    load the latest messages of a room (size-capped)
  * - canAccessRoom(): check that a user may read/write a room (R7, R11)
+ * - markRead():      record that a user has read a room (Task 2.5 — Read Receipts)
  */
 
 export type MessageType = ChatMessage['type'];
@@ -288,4 +289,23 @@ export async function getHistory(
   }
 
   return newestFirst.reverse();
+}
+
+/**
+ * Task 2.5 — Read Receipts.
+ * Adds `username` to readBy of every message in the room they have not read yet.
+ * Only room members may mark a room as read (prevents forged receipts).
+ * Returns how many messages changed; 0 means nothing new, so callers can skip broadcasting.
+ */
+export async function markRead(roomId: unknown, username: unknown): Promise<number> {
+  const id = validateRoomId(roomId);
+  if (!isValidUsername(username)) throw new MessageValidationError('Invalid username');
+  if (!(await canAccessRoom(id, username))) throw new RoomAccessError();
+
+  // $ne + $addToSet: only touches unread messages and never adds a name twice
+  const result = await MessageModel.updateMany(
+    { roomId: id, readBy: { $ne: username } },
+    { $addToSet: { readBy: username } },
+  );
+  return result.modifiedCount;
 }
