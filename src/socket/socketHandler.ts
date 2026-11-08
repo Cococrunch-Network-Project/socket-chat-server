@@ -17,9 +17,16 @@ export const setupSocketHandlers = (
     }
 
     try {
+      // เช็กก่อนว่ามีชื่อนี้ในระบบและกำลังออนไลน์อยู่หรือไม่
+      const existingUser = await UserModel.findOne({ username: payload.username });
+      if (existingUser && existingUser.isOnline) {
+        return callback({ success: false, message: 'Username is already taken and currently online' });
+      }
+
+      // ถ้าไม่มี หรือมีแต่ออฟไลน์อยู่ ก็ให้อัปเดต/สร้างใหม่ได้เลย
       await UserModel.updateOne(
         { username: payload.username },
-        { $set: { isOnline: true, socketId: socket.id } },
+        { $set: { isOnline: true, socketId: socket.id, lastSeen: new Date() } },
         { upsert: true, runValidators: true } // runValidators สำคัญมากสำหรับการ Upsert
       );
 
