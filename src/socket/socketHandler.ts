@@ -13,6 +13,7 @@ export const setupSocketHandlers = (
   socket: Socket<ClientToServerEvents, ServerToClientEvents, Record<string, never>, SocketData>
 ) => {
 
+  registerTypingHandlers(socket) 
   let registering = false;
   socket.on('register_user', async (payload, callback) => {
     if (typeof callback !== 'function') return;

@@ -9,6 +9,8 @@ import { connectDB } from './db/connect.js';
 import { setupSocketHandlers } from './socket/socketHandler.js';
 import { registerHistoryHandlers } from './socket/historyHandlers.js';
 import { ClientToServerEvents, ServerToClientEvents, SocketData } from './types/socket.js';
+import { registerTypingHandlers } from './socket/typingHandlers.js';
+import { registerReadHandlers } from './socket/readHandlers.js';
 
 import { UserModel } from './models/User.js';
 
@@ -24,13 +26,17 @@ const io = new Server<ClientToServerEvents, ServerToClientEvents, Record<string,
     origin: process.env.CLIENT_ORIGIN || '*',
     methods: ['GET', 'POST'],
   },
-  maxHttpBufferSize: 7e6, 
+  maxHttpBufferSize: 1e7,
 });
 
 io.on('connection', (socket) => {
   // ให้ Backend 2 จัดการเรื่องประวัติแชทผ่าน handler ที่แยกไว้
   registerHistoryHandlers(socket); 
   
+  //R9 R10
+  registerTypingHandlers(socket);
+  registerReadHandlers(socket);
+
   // ของเราจัดการ Core Logic ในส่วนที่เหลือ
   setupSocketHandlers(io, socket);
 });
