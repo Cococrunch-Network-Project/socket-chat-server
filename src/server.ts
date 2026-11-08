@@ -10,6 +10,8 @@ import { setupSocketHandlers } from './socket/socketHandler.js';
 import { registerHistoryHandlers } from './socket/historyHandlers.js';
 import { ClientToServerEvents, ServerToClientEvents, SocketData } from './types/socket.js';
 
+import { UserModel } from './models/User.js';
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -49,7 +51,10 @@ const getLANAddress = () => {
 };
 
 // บังคับ Connect DB ให้สำเร็จก่อนเปิดรับ Connection จาก Client
-connectDB().then(() => {
+connectDB().then(async () => {
+  // รีเซ็ตสถานะทุกคนให้ออฟไลน์เมื่อเซิร์ฟเวอร์เริ่มทำงานใหม่
+  await UserModel.updateMany({}, { $set: { isOnline: false, socketId: null } });
+
   server.listen(PORT, () => {
     const lanIp = getLANAddress();
     console.log('🚀 Core Socket Server is running with DB Connected!');
