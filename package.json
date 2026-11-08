@@ -12,7 +12,8 @@
     "start": "node dist/server.js",
     "test:history": "tsx src/scripts/testHistory.ts",
     "test:typing": "tsx src/scripts/testTyping.ts",
-    "test:ai-chat": "tsx src/scripts/testAiChat.ts"
+    "test:ai-chat": "tsx src/scripts/testAiChat.ts",
+    "test:read": "tsx src/scripts/testReadReceipts.ts"
   },
   "repository": {
     "type": "git",
